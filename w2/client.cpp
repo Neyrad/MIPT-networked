@@ -1,133 +1,179 @@
-#include "raylib.h"
 #include <enet/enet.h>
+#include <raylib.h>
 #include <iostream>
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include <sstream>
+#include <cstring>
 
-void send_fragmented_packet(ENetPeer *peer)
-{
-  const char *baseMsg = "Stay awhile and listen. ";
-  const size_t msgLen = strlen(baseMsg);
+struct Player {
+    int id;
+    std::string name;
+    float x, y;
+    uint32_t ping;
+};
 
-  const size_t sendSize = 2500;
-  char *hugeMessage = new char[sendSize];
-  for (size_t i = 0; i < sendSize; ++i)
-    hugeMessage[i] = baseMsg[i % msgLen];
-  hugeMessage[sendSize-1] = '\0';
+std::unordered_map<int, Player> players;
+int myId = -1;
+std::string myName;
+float posX = 100.0f, posY = 100.0f;
+ENetPeer* gamePeer = nullptr;
+bool gameStarted = false;
 
-  ENetPacket *packet = enet_packet_create(hugeMessage, sendSize, ENET_PACKET_FLAG_RELIABLE);
-  enet_peer_send(peer, 0, packet);
-
-  delete[] hugeMessage;
+void sendStartCommand(ENetPeer* lobbyPeer) {
+    const char* msg = "start";
+    ENetPacket* packet = enet_packet_create(msg, strlen(msg) + 1, ENET_PACKET_FLAG_RELIABLE);
+    enet_peer_send(lobbyPeer, 0, packet);
 }
 
-void send_micro_packet(ENetPeer *peer)
-{
-  const char *msg = "dv/dt";
-  ENetPacket *packet = enet_packet_create(msg, strlen(msg) + 1, ENET_PACKET_FLAG_UNSEQUENCED);
-  enet_peer_send(peer, 1, packet);
-}
-
-int main(int argc, const char **argv)
-{
-  int width = 800;
-  int height = 600;
-  InitWindow(width, height, "w2 MIPT networked");
-
-  const int scrWidth = GetMonitorWidth(0);
-  const int scrHeight = GetMonitorHeight(0);
-  if (scrWidth < width || scrHeight < height)
-  {
-    width = std::min(scrWidth, width);
-    height = std::min(scrHeight - 150, height);
-    SetWindowSize(width, height);
-  }
-
-  SetTargetFPS(60);               // Set our game to run at 60 frames-per-second
-
-  if (enet_initialize() != 0)
-  {
-    printf("Cannot init ENet");
-    return 1;
-  }
-
-  ENetHost *client = enet_host_create(nullptr, 1, 2, 0, 0);
-  if (!client)
-  {
-    printf("Cannot create ENet client\n");
-    return 1;
-  }
-
-  ENetAddress address;
-  enet_address_set_host(&address, "localhost");
-  address.port = 10887;
-
-  ENetPeer *lobbyPeer = enet_host_connect(client, &address, 2, 0);
-  if (!lobbyPeer)
-  {
-    printf("Cannot connect to lobby");
-    return 1;
-  }
-
-  uint32_t timeStart = enet_time_get();
-  uint32_t lastFragmentedSendTime = timeStart;
-  uint32_t lastMicroSendTime = timeStart;
-  bool connected = false;
-  float posx = GetRandomValue(100, 1000);
-  float posy = GetRandomValue(100, 500);
-  float velx = 0.f;
-  float vely = 0.f;
-  while (!WindowShouldClose())
-  {
-    const float dt = GetFrameTime();
-    ENetEvent event;
-    while (enet_host_service(client, &event, 10) > 0)
-    {
-      switch (event.type)
-      {
-      case ENET_EVENT_TYPE_CONNECT:
-        printf("Connection with %x:%u established\n", event.peer->address.host, event.peer->address.port);
-        connected = true;
-        break;
-      case ENET_EVENT_TYPE_RECEIVE:
-        printf("Packet received '%s'\n", event.packet->data);
-        enet_packet_destroy(event.packet);
-        break;
-      default:
-        break;
-      };
+void connectToGameServer(ENetHost* client, const std::string& ip, enet_uint16 port) {
+    ENetAddress address;
+    enet_address_set_host(&address, ip.c_str());
+    address.port = port;
+    gamePeer = enet_host_connect(client, &address, 2, 0);
+    if (!gamePeer) {
+        std::cerr << "Failed to connect to game server." << std::endl;
     }
-    if (connected)
-    {
-      uint32_t curTime = enet_time_get();
-      if (curTime - lastFragmentedSendTime > 1000)
-      {
-        lastFragmentedSendTime = curTime;
-        send_fragmented_packet(lobbyPeer);
-      }
-      if (curTime - lastMicroSendTime > 100)
-      {
-        lastMicroSendTime = curTime;
-        send_micro_packet(lobbyPeer);
-      }
-    }
-    bool left = IsKeyDown(KEY_LEFT);
-    bool right = IsKeyDown(KEY_RIGHT);
-    bool up = IsKeyDown(KEY_UP);
-    bool down = IsKeyDown(KEY_DOWN);
-    constexpr float accel = 30.f;
-    velx += ((left ? -1.f : 0.f) + (right ? 1.f : 0.f)) * dt * accel;
-    vely += ((up ? -1.f : 0.f) + (down ? 1.f : 0.f)) * dt * accel;
-    posx += velx * dt;
-    posy += vely * dt;
-    velx *= 0.99f;
-    vely *= 0.99f;
-
-    BeginDrawing();
-      ClearBackground(BLACK);
-      DrawText(TextFormat("Current status: %s", "unknown"), 20, 20, 20, WHITE);
-      DrawText(TextFormat("My position: (%d, %d)", (int)posx, (int)posy), 20, 40, 20, WHITE);
-      DrawText("List of players:", 20, 60, 20, WHITE);
-      DrawCircleV(Vector2{posx, posy}, 10.f, WHITE);
-    EndDrawing();
-  }
-  return 0;
 }
+
+void sendPosition() {
+    if (!gamePeer) return;
+    std::ostringstream oss;
+    oss << "pos:" << myId << ":" << static_cast<int>(posX) << ":" << static_cast<int>(posY);
+    std::string msg = oss.str();
+    ENetPacket* packet = enet_packet_create(msg.c_str(), msg.size() + 1, ENET_PACKET_FLAG_UNSEQUENCED);
+    enet_peer_send(gamePeer, 1, packet);
+}
+
+void drawPlayers() {
+    for (const auto& [id, player] : players) {
+        if (id == myId) continue;
+        DrawCircle(static_cast<int>(player.x), static_cast<int>(player.y), 10, RED);
+        DrawText(player.name.c_str(), static_cast<int>(player.x) + 12, static_cast<int>(player.y) - 10, 10, WHITE);
+        DrawText(TextFormat("Ping: %d", player.ping), static_cast<int>(player.x) + 12, static_cast<int>(player.y) + 2, 10, WHITE);
+    }
+}
+
+int main(int argc, const char** argv) {
+    if (enet_initialize() != 0) {
+        std::cerr << "Failed to initialize ENet." << std::endl;
+        return EXIT_FAILURE;
+    }
+    atexit(enet_deinitialize);
+
+    ENetHost* client = enet_host_create(nullptr, 2, 2, 0, 0);
+    if (!client) {
+        std::cerr << "Failed to create ENet client." << std::endl;
+        return EXIT_FAILURE;
+    }
+
+    ENetAddress lobbyAddress;
+    enet_address_set_host(&lobbyAddress, "localhost");
+    lobbyAddress.port = 10887;
+    ENetPeer* lobbyPeer = enet_host_connect(client, &lobbyAddress, 2, 0);
+    if (!lobbyPeer) {
+        std::cerr << "Failed to connect to lobby server." << std::endl;
+        return EXIT_FAILURE;
+    }
+
+    InitWindow(800, 600, "ENet Client");
+    SetTargetFPS(60);
+
+    uint32_t lastSendTime = enet_time_get();
+
+    while (!WindowShouldClose()) {
+        ENetEvent event;
+        while (enet_host_service(client, &event, 0) > 0) {
+            if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+                std::string data(reinterpret_cast<char*>(event.packet->data));
+                if (data.rfind("gameserver:", 0) == 0) {
+                    std::string addr = data.substr(11);
+                    size_t colonPos = addr.find(':');
+                    if (colonPos != std::string::npos) {
+                        std::string ip = addr.substr(0, colonPos);
+                        enet_uint16 port = static_cast<enet_uint16>(std::stoi(addr.substr(colonPos + 1)));
+                        connectToGameServer(client, ip, port);
+                        gameStarted = true;
+                    }
+                } else if (data.rfind("id:", 0) == 0) {
+                    std::istringstream iss(data);
+                    std::string token;
+                    std::getline(iss, token, ':'); // "id"
+                    std::getline(iss, token, ':');
+                    myId = std::stoi(token);
+                    std::getline(iss, myName);
+                    players[myId] = { myId, myName, posX, posY, 0 };
+                } else if (data.rfind("playerlist:", 0) == 0) {
+                    std::string list = data.substr(11);
+                    std::istringstream iss(list);
+                    std::string entry;
+                    while (std::getline(iss, entry, ',')) {
+                        size_t colonPos = entry.find(':');
+                        if (colonPos != std::string::npos) {
+                            int id = std::stoi(entry.substr(0, colonPos));
+                            std::string name = entry.substr(colonPos + 1);
+                            if (players.find(id) == players.end()) {
+                                players[id] = { id, name, 0.0f, 0.0f, 0 };
+                            }
+                        }
+                    }
+                } else if (data.rfind("pos:", 0) == 0) {
+                    std::istringstream iss(data);
+                    std::string token;
+                    std::getline(iss, token, ':'); // "pos"
+                    std::getline(iss, token, ':');
+                    int id = std::stoi(token);
+                    std::getline(iss, token, ':');
+                    float x = std::stof(token);
+                    std::getline(iss, token);
+                    float y = std::stof(token);
+                    if (players.find(id) != players.end()) {
+                        players[id].x = x;
+                        players[id].y = y;
+                    }
+                } else if (data.rfind("ping:", 0) == 0) {
+                    std::istringstream iss(data);
+                    std::string token;
+                    std::getline(iss, token, ':'); // "ping"
+                    std::getline(iss, token, ':');
+                    int id = std::stoi(token);
+                    std::getline(iss, token);
+                    uint32_t ping = static_cast<uint32_t>(std::stoi(token));
+                    if (players.find(id) != players.end()) {
+                        players[id].ping = ping;
+                    }
+                }
+                enet_packet_destroy(event.packet);
+            }
+        }
+
+        if (IsKeyPressed(KEY_ENTER)) {
+            sendStartCommand(lobbyPeer);
+        }
+
+        float speed = 100.0f * GetFrameTime();
+        if (IsKeyDown(KEY_RIGHT)) posX += speed;
+        if (IsKeyDown(KEY_LEFT)) posX -= speed;
+        if (IsKeyDown(KEY_DOWN)) posY += speed;
+        if (IsKeyDown(KEY_UP)) posY -= speed;
+
+        if (gameStarted && enet_time_get() - lastSendTime > 100) {
+            sendPosition();
+            lastSendTime = enet_time_get();
+        }
+
+        BeginDrawing();
+        ClearBackground(BLACK);
+        DrawText(TextFormat("My ID: %d", myId), 10, 10, 20, WHITE);
+        DrawText(TextFormat("My Name: %s", myName.c_str()), 10, 30, 20, WHITE);
+        DrawCircle(static_cast<int>(posX), static_cast<int>(posY), 10, GREEN);
+        drawPlayers();
+        EndDrawing();
+    }
+
+    CloseWindow();
+    enet_host_destroy(client);
+    return 0;
+}
+

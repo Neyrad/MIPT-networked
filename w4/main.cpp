@@ -6,7 +6,7 @@
 #include <vector>
 #include "entity.h"
 #include "protocol.h"
-
+#include <cstdio>
 
 static std::vector<Entity> entities;
 static std::unordered_map<uint16_t, size_t> indexMap;
@@ -40,11 +40,24 @@ void on_snapshot(ENetPacket *packet)
 {
   uint16_t eid = invalid_entity;
   float x = 0.f; float y = 0.f;
-  deserialize_snapshot(packet, eid, x, y);
+  float size = 0.f;
+  deserialize_snapshot(packet, eid, x, y, size);
   get_entity(eid, [&](Entity& e)
   {
     e.x = x;
     e.y = y;
+    e.size = size;
+  });
+}
+
+void on_score_update(ENetPacket *packet)
+{
+  uint16_t eid = invalid_entity;
+  float new_score = 0.f;
+  deserialize_score_update(packet, eid, new_score);
+
+  get_entity(eid, [&](Entity& e) {
+    e.size = new_score;
   });
 }
 
@@ -123,6 +136,9 @@ int main(int argc, const char **argv)
         case E_SERVER_TO_CLIENT_SNAPSHOT:
           on_snapshot(event.packet);
           break;
+        case E_SERVER_TO_CLIENT_SCORE:
+          on_score_update(event.packet);
+          break;
         };
         break;
       default:
@@ -142,7 +158,7 @@ int main(int argc, const char **argv)
         e.y += ((up ? -dt : 0.f) + (down ? +dt : 0.f)) * 100.f;
 
         // Send
-        send_entity_state(serverPeer, my_entity, e.x, e.y);
+        send_entity_state(serverPeer, my_entity, e.x, e.y, e.size);
         camera.target.x = e.x;
         camera.target.y = e.y;
       });
@@ -154,8 +170,41 @@ int main(int argc, const char **argv)
       BeginMode2D(camera);
         for (const Entity &e : entities)
         {
-          const Rectangle rect = {e.x, e.y, 10.f, 10.f};
+          const Rectangle rect = {e.x - e.size, e.y - e.size, 2 * e.size, 2 * e.size};
           DrawRectangleRec(rect, GetColor(e.color));
+        }
+
+	float posX = 0.f; float posY = 0.f;
+        uint16_t eid = 0; float size = 0.f;
+        get_entity(my_entity, [&](const Entity& e)
+        {
+            posX = e.x;
+            posY = e.y;
+	    eid = e.eid;
+	    size = e.size;
+    	});
+
+        std::vector<Entity> sortedEntities;
+        for (const Entity& e : entities)
+        {
+            if (!e.serverControlled)
+                sortedEntities.push_back(e);
+        }
+
+        std::sort(sortedEntities.begin(), sortedEntities.end(), [](const Entity& a, const Entity& b) {
+            return a.size > b.size;
+        });
+
+        float listX = posX - 370;
+        float listY = posY - 280;
+
+        int rank = 1;
+        for (const Entity& e : sortedEntities)
+        {
+            Color textColor = (e.eid == my_entity) ? YELLOW : WHITE;
+            DrawText(TextFormat("%d. Player ID: %d, score: %.0f", rank, e.eid, e.size), listX, listY, 20, textColor);
+            listY += 25;
+            rank++;
         }
 
       EndMode2D();

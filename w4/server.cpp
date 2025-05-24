@@ -5,9 +5,14 @@
 #include <stdlib.h>
 #include <vector>
 #include <map>
+#include <cmath>
 
 static std::vector<Entity> entities;
 static std::map<uint16_t, ENetPeer*> controlledMap;
+
+float rand_range(float min, float max) {
+    return min + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / (max - min)));
+}
 
 static uint16_t create_random_entity()
 {
@@ -18,9 +23,58 @@ static uint16_t create_random_entity()
                    0x00000044 * (1 + rand() % 4);
   float x = (rand() % 40 - 20) * 5.f;
   float y = (rand() % 40 - 20) * 5.f;
-  Entity ent = {color, x, y, newEid, false, 0.f, 0.f};
+  float size = rand_range(3.f, 10.f);
+  Entity ent = {color, x, y, newEid, false, 0.f, 0.f, size};
   entities.push_back(ent);
   return newEid;
+}
+
+constexpr float ENTITY_SIZE_LOWER_LIMIT = 3.f;
+constexpr float ENTITY_SIZE_UPPER_LIMIT = 200.f;
+constexpr float EPS = 1e-6;
+void consume(Entity& eater, Entity& food) {
+    eater.size += food.size * 0.5f;
+    if (eater.size > ENTITY_SIZE_UPPER_LIMIT) eater.size = ENTITY_SIZE_UPPER_LIMIT;
+    
+    food.x = rand_range(-400.f, 400.f);
+    food.y = rand_range(-300.f, 300.f);
+    food.size /= 2;
+    // eps helps to avoid being stuck ar lower limit
+    if (food.size < ENTITY_SIZE_LOWER_LIMIT) food.size = ENTITY_SIZE_LOWER_LIMIT + rand_range(0.f, EPS);
+
+    if (eater.serverControlled && food.serverControlled) return;
+
+    for (const auto& pair : controlledMap) {
+        ENetPeer* peer = pair.second;
+        if (peer) { 
+            send_score_update(peer, eater.eid, eater.size);
+            send_score_update(peer, food.eid, food.size);
+        }
+    }
+}
+
+void check_collisions(ENetHost* server) {
+    for (size_t i = 0; i < entities.size(); ++i) {
+        for (size_t j = i + 1; j < entities.size(); ++j) {
+            Entity& a = entities[i];
+            Entity& b = entities[j];
+
+            float dx = a.x - b.x;
+            float dy = a.y - b.y;
+            if (fabs(dx) < a.size + b.size && fabs(dy) < a.size + b.size) {
+	
+	        if (a.size > b.size) consume(a, b);
+                else if (b.size > a.size) consume(b, a);
+		
+
+                for (size_t i = 0; i < server->peerCount; ++i) {
+                    ENetPeer *peer = &server->peers[i];
+                    send_snapshot(peer, a.eid, a.x, a.y, a.size);
+                    send_snapshot(peer, b.eid, b.x, b.y, b.size);
+                }
+            }
+        }
+    }
 }
 
 void on_join(ENetPacket *packet, ENetPeer *peer, ENetHost *host)
@@ -35,7 +89,6 @@ void on_join(ENetPacket *packet, ENetPeer *peer, ENetHost *host)
 
   controlledMap[newEid] = peer;
 
-
   // send info about new entity to everyone
   for (size_t i = 0; i < host->peerCount; ++i)
     send_new_entity(&host->peers[i], ent);
@@ -47,12 +100,14 @@ void on_state(ENetPacket *packet)
 {
   uint16_t eid = invalid_entity;
   float x = 0.f; float y = 0.f;
-  deserialize_entity_state(packet, eid, x, y);
+  float size = 0.f;
+  deserialize_entity_state(packet, eid, x, y, size);
   for (Entity &e : entities)
     if (e.eid == eid)
     {
       e.x = x;
       e.y = y;
+      e.size = size;
     }
 }
 
@@ -78,6 +133,7 @@ int main(int argc, const char **argv)
 
   constexpr int numAi = 10;
 
+  srand(time(nullptr));
   for (int i = 0; i < numAi; ++i)
   {
     uint16_t eid = create_random_entity();
@@ -115,6 +171,9 @@ int main(int argc, const char **argv)
         break;
       };
     }
+
+    check_collisions(server);
+
     for (Entity &e : entities)
     {
       if (e.serverControlled)
@@ -139,7 +198,7 @@ int main(int argc, const char **argv)
       {
         ENetPeer *peer = &server->peers[i];
         if (controlledMap[e.eid] != peer)
-          send_snapshot(peer, e.eid, e.x, e.y);
+          send_snapshot(peer, e.eid, e.x, e.y, e.size);
       }
     }
     //usleep(400000);
@@ -150,5 +209,3 @@ int main(int argc, const char **argv)
   atexit(enet_deinitialize);
   return 0;
 }
-
-
